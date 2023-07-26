@@ -1,0 +1,489 @@
+---
+title: "Cleaned Final"
+author: "Erin Melia"
+date: "2023-07-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, cache = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(ggthemes)
+library(ranger)
+library(dplyr)
+library(ggplot2)
+library(vip)
+library(biscale)
+library(cowplot)
+library(tidycensus)
+library(ggpubr)
+
+
+df <- read_csv("data/raw/analytic_data2023_0.csv")
+colnames(df) <- df[1,]
+df = df[-1,]
+```
+
+```{r cleaned up data}
+cleaned_df <- df %>%
+  # Remove the rows that aren't counties but entire states
+  select(county, state,
+         county_ranked = county_ranked,
+         population = v051_rawvalue, # County population
+         median_household_income = v063_rawvalue,
+         years_premature_death = v001_rawvalue,
+         firearm_fatalities = v148_rawvalue,
+         homicides = v015_rawvalue, # Number per 100K
+         suicides = v161_rawvalue, # Number per 100K
+         motor_fatalities = v039_rawvalue, # Number per 100K
+         math_scores = v160_rawvalue,
+         income_inequality = v044_rawvalue, # Ratio of income at 80th pc-tile to 20th
+         child_poverty = v024_rawvalue, # pct under 18 in poverty
+         foodinsecurity = v139_rawvalue, #percentage of population lack consistent access to quality food
+         excessive_drinking = v049_rawvalue, #Percentage of adults reporting binge or heavy drinking
+         percent_under_18 = v052_rawvalue,
+         percent_over_65 = v053_rawvalue,
+         high_school = v168_rawvalue,
+         life_expectancy = v147_rawvalue,
+         income = v063_rawvalue,
+         drug_overdose = v138_rawvalue,)  %>% 
+  mutate(across(!c(county, state), as.numeric))
+
+cleaned_df %>% map_int(~sum(is.na(.)))
+```
+
+```{r missing_data}
+missing_df_table = cleaned_df %>%
+  map_dfr(~sum(is.na(.))) %>%
+  pivot_longer(cols = everything(),
+               names_to = 'variable',
+               values_to = 'missing') %>%
+  filter(variable %in% c('years_premature_death', 'suicides', 'median_household_income',
+                         'homicides', 'excessive_drinking', 'high_school',
+                         'firearm_fatalities')) %>%
+  mutate(percent_total = missing / total_counties) %>%
+  mutate(variable = stringr::str_replace_all(variable, '_', ' ')) %>%
+  mutate(variable = stringr::str_to_title(variable)) %>%
+  arrange(desc(percent_total)) %>%
+  gt() %>%
+  fmt_percent(columns = c('percent_total'), decimals = 1) %>%
+  data_color(columns = c('percent_total'),
+             fn = scales::col_numeric(palette = 'magma', domain = c(-50,100)),
+             apply_to = 'text') %>%
+  cols_label(percent_total = "Percent of Total Counties") %>%
+  opt_stylize(style = 5, color = "blue", add_row_striping = TRUE) %>%
+  gtExtras::gt_theme_espn()
+  gtsave(missing_df_table, filename = 'table.png', zoom = 8)
+
+```
+
+```{r erin| high school plot, fig.height = 7}
+state.labs <-c("Montana","Wyoming","Vermont","Maine","California","Texas","New Mexico","Mississippi","Louisiana")
+names(state.labs) <- c("MT","WY","VT","ME", "CA", "TX", "NM", "MS", "LA")
+
+hs_plot = cleaned_df %>% 
+  filter(!is.na(county_ranked)) %>%
+  filter(state %in% c("MT","WY","VT","ME", "CA", "TX", "NM", "MS", "LA")) %>% 
+  mutate(county = tidytext::reorder_within(county,
+                                 high_school, state)) %>% 
+  group_by(state) %>% 
+  mutate(state_median_income = median(income)) %>% 
+  mutate(state_quantile_pop = quantile(population, 0.2)) %>% 
+  ungroup() %>% 
+  filter(population > state_quantile_pop) %>% 
+  mutate(high_income = ifelse(income > state_median_income, "Above Median Income","Below Median Income")) %>% 
+  ggplot(aes(x=high_school, y= years_premature_death, color = high_income)) +
+  geom_point(aes(shape = high_income)) +
+  scale_shape_discrete(guide = "none") +
+  geom_smooth(se= FALSE, method = "lm") +
+  theme_light() +
+  theme(axis.text.y = element_text(size = 7, hjust = 1),  axis.text.x = element_text(size = 9, color = "black"), legend.position = "bottom", legend.direction = "vertical", plot.margin = margin(t = 1, r = 3, b = 1, l = 2, unit = "cm")) +
+  labs( color ="", y= "Premature Deaths (per 100,000 population)", x="High School Completion Rate", title = str_wrap("Years of Life Lost (per 100,000 population) vs. High School Completion Rate", width = 80)) +
+  theme(plot.title = element_text(face = "bold"),
+        strip.text = element_text(colour = 'black'),
+        panel.spacing = unit(2, "lines"),
+        text = element_text(size = 14))+
+  guides(color = guide_legend(direction = "horizontal")) +
+  scale_color_brewer(palette = "Paired") +
+  scale_x_continuous(labels = scales::percent_format()) +
+  facet_wrap(~state, scales = "free_x", labeller = labeller(state = state.labs)) +
+  theme(text = element_text(size = 19))
+
+ggsave(hs_plot, filename = 'hsplot.png', dpi = 1000, width = 10)
+# The original hypothesis was that as High School Completion Rate increased, so would the Premature Death value, as level of an education could have an effect on premature years of life lost. I examined the top 4 and bottom 5 states for high school completion rate, and looked at how their counties compare to each other. 
+#While I originally anticipated a linear decrease, some states, such as CA and TX, showed a trend of counties that increased as high school completion rate increased. We then hypothesized that the income and wealth of a county might instead affect both variables, so the counties were then divided based on whether the county was above or below the median income for the state. We also filtered out counties that had a population less than the 0.2 quantile for the state, to exclude counties that may be outliers because they have such low populations. This made it more clear that while the original hypothesis seemed to be accurate for counties above the median income, counties below the median income showed more variability, with some states showing an upward trend instead for these counties. Despite the original hypothesis, level of education does not seem to be a direct indicator of premature deaths among states, and the data suggests that it could instead be the quality of the education. 
+#lasso or random forests
+```
+
+```{r erin | grid search to find best mtry, cache=TRUE}
+# Define the target variable and features using R formula interface
+target_var <- 'years_premature_death'
+feature_formula <- as.formula(paste(target_var, "~ ."))
+
+# Data preprocessing (same as before)
+variables_rf = c('income_inequality', 'homicides',
+          'firearm_fatalities',
+          'high_school',
+         'excessive_drinking', 
+          'math_scores', 
+          'drug_overdose', 
+          'foodinsecurity',
+          'motor_fatalities', 
+          'child_poverty',
+         'median_household_income')
+
+rf_df = cleaned_df %>%
+  filter(!is.na(county_ranked)) %>%
+  select(-county_ranked) %>% 
+  filter(complete.cases(across(all_of(variables_rf)))) %>% select(-life_expectancy, -income, -suicides)
+
+# Hyperparameter tuning using grid search
+mtry_values <- seq(2, 6, by = 1) # Range of mtry values to try
+num_trees_values <- c(100, 150, 200, 300, 400, 450) # Range of num.trees values to try
+
+best_mtry <- NULL
+best_num_trees <- NULL
+best_rmse <- Inf
+
+for (mtry in mtry_values) {
+  for (num_trees in num_trees_values) {
+    # Cross-validation instead of 80-20 train-test split
+    set.seed(123) # for reproducibility
+    num_folds <- 5
+    folds <- cut(seq(1, nrow(rf_df)), breaks = num_folds, labels = FALSE)
+    
+    rmse_list <- c()
+    
+    for (i in 1:num_folds) {
+      # Create training and testing data for the current fold
+      rf_train_df <- subset(rf_df, folds != i)
+      rf_test_df <- subset(rf_df, folds == i)
+      
+      # Train the Random Forest model with current mtry and num.trees
+      rf_model <- ranger(feature_formula, data = rf_train_df, mtry = mtry, num.trees = num_trees, importance = "impurity")
+      
+      # Make predictions on the test data
+      predictions <- predict(rf_model, data = rf_test_df)$predictions
+      
+      # Calculate RMSE for the fold
+      fold_rmse <- sqrt(mean((rf_test_df$years_premature_death - predictions)^2))
+      rmse_list <- c(rmse_list, fold_rmse)
+    }
+    
+    # Calculate the mean RMSE across all folds for the current mtry and num.trees
+    mean_rmse <- mean(rmse_list)
+    
+    # Check if this combination of mtry and num.trees gives the lowest RMSE so far
+    if (mean_rmse < best_rmse) {
+      best_rmse <- mean_rmse
+      best_mtry <- mtry
+      best_num_trees <- num_trees
+    }
+  }
+}
+
+best_mtry
+ best_num_trees
+```
+
+```{r erin | model}
+target_var <- 'years_premature_death'
+feature_formula <- as.formula(paste(target_var, "~ ."))
+
+variables_rf = c('income_inequality', 'homicides',
+          'firearm_fatalities',
+          'high_school',
+         'excessive_drinking', 
+          'math_scores', 
+          'drug_overdose', 
+          'foodinsecurity',
+          'motor_fatalities', 
+          'child_poverty',
+         'median_household_income')
+rf_df = cleaned_df %>% 
+  filter(!is.na(county_ranked)) %>%
+  select(-county_ranked) %>% 
+  filter(complete.cases(across(all_of(variables_rf)))) %>% select(-life_expectancy, -income, -suicides)
+
+# Cross-validation instead of 80-20 train-test split
+set.seed(123) # for reproducibility
+num_folds <- 10
+folds <- cut(seq(1, nrow(rf_df)), breaks = num_folds, labels = FALSE)
+predictions_list <- list()
+models_list <- list()
+
+for (i in 1:num_folds) {
+  # Create training and testing data for the current fold
+  rf_train_df <- subset(rf_df, folds != i)
+  rf_test_df <- subset(rf_df, folds == i)
+  
+  # Train the Random Forest model
+  rf_model <- ranger(feature_formula, data = rf_train_df, mtry = 5, num.trees = 450, importance = "impurity")
+  models_list[[i]] <- rf_model
+  
+  # Make predictions on the test data
+  predictions <- predict(rf_model, data = rf_test_df)$predictions
+  predictions_list[[i]] <- data.frame(rf_test_df, prediction = predictions)
+}
+
+
+predicted_df <- do.call(rbind, predictions_list)
+# Evaluate the performance of the model
+predicted_df <- predicted_df %>% mutate(error = (years_premature_death - prediction)^2)
+
+predicted_df_plot = predicted_df %>% 
+  ggplot(aes(x = prediction, y = years_premature_death)) +
+  geom_point(aes(color = error), show.legend = FALSE) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "gray") +
+  scale_color_viridis_c(option = 'viridis', begin =0.1) +
+  labs(x = "Predicted Years of Premature Death (per 100k)",
+       y = "Actual Years of Premature Death (per 100k)",
+       title = "Predictive Accuracy of Random Forest Model",
+       color = "Error") +
+  theme_light() +
+  theme(text = element_text(size = 15))
+
+ggsave(predicted_df_plot, filename = 'predicted_df_plot.png', dpi = 1000, width = 8)
+
+
+# vip(models_list[[1]], geom = "point") + labs(y = "Variable Importance Scores") + theme_bw() + scale_x_discrete(labels = c('high_school' = 'High School Completion Rate', 'homicides' = 'Homicides', 'motor_fatalities' = 'Motor Fatalities', 'child_poverty' = 'Children In Poverty', 'foodinsecurity' = 'Food Insecurity', 'firearm_fatalities' = 'Firearm Fatalities',  'drug_overdose' = 'Drug Overdoses', 'excessive_drinking' = 'Excessive Drinking Percentage', 'population' = 'Population', 'median_household_income' = 'Median Household Income')) 
+
+#The fit was quite accurate, although there was one major outlier: for McKinley County, NM, our model predicted about 12K years of premature death per 100K people while the actual value was over 21K. [ADD A SENTENCE TALKING ABOUT THIS COUNTY: it has very low income rates, high proportion of Native Americans, low population–speculate WHY it could be so different]
+#High motor fatalities and income inequality, low median household income, high child poverty, high food insecurity, 
+
+vip_df <- vip(models_list[[1]], geom = "point")[[1]]
+
+vip_df_plot = vip_df %>% mutate(Variable = stringr::str_replace_all(Variable, '_', ' ')) %>%
+  mutate(Variable = stringr::str_to_title(Variable)) %>% 
+  mutate(Variable = fct_reorder(Variable, Importance)) %>% 
+  ggplot(aes(x = Importance, y = Variable)) +
+  geom_col(aes(fill = Importance), size = 2, show.legend = F)+
+  labs(x = 'Variable Importance Scores', y= '') +
+  theme_light() +
+  scale_fill_viridis_c(option = 'viridis', direction = -1, end = 0.9) +
+  theme(text = element_text(size = 15)) +
+  scale_y_discrete(labels = c('Foodinsecurity'='Food Insecurity'))
+
+ggsave(vip_df_plot, filename = 'vip_plot.png', dpi = 1000, width = 8)
+
+```
+
+```{r ken | rose plot w legend, cache=TRUE}
+  cleaned_df %>%
+  filter(is.na(county_ranked)) %>%
+  select(income,
+         years_premature_death,
+         state) %>%
+  mutate(state = factor(state)) %>%
+  mutate(state = fct_reorder(state, years_premature_death)) %>% 
+  ggplot(aes(x = state, y = years_premature_death, fill = income)) +
+  geom_bar(stat = "identity") +
+  coord_polar() +
+  scale_fill_viridis_c(option = 'magma', labels= scales::dollar_format(scale = 0.001, suffix = 'K')) +
+  theme_light() +
+  xlab("States") + ylab("Premature Death") + 
+  guides(fill=guide_legend(title="Median Household Income"))
+
+ggsave(filename = 'plot_rose.png', width = 7, height = 5)
+```
+
+```{r ken | 3 v 3 states w legend, cache=TRUE}
+biclass_df =
+  tidycensus::get_acs(geography = "county",
+                      variables = "B19013_001",
+                      geometry = TRUE, year = 2021) %>%
+  select(-variable, -moe, -estimate) %>%
+  separate(col = 'NAME', into = c('county', 'state'), sep = ', ') %>%
+  mutate(state = usdata::state2abbr(state)) %>%
+  tigris::shift_geometry()  %>%
+  left_join(cleaned_df, by = c('state', 'county')) %>%
+  filter(!is.na(median_household_income)) %>%
+  filter(!is.na(years_premature_death)) %>%
+  select(GEOID, county, state,
+         years_premature_death, median_household_income, geometry) %>%
+  bi_class(x = median_household_income,
+           y = years_premature_death,
+           style = "quantile", dim = 3)
+legend <- bi_legend(pal = "BlueYl",
+                    dim = 3,
+                    xlab = "Richer",
+                    ylab = "More Prem. Death",
+                    size = 7)
+states_of_interest <- c('MA', 'NY', 'CT', 'AL','LA', 'MS')
+state_df_list = map(states_of_interest, ~ biclass_df %>% filter(state == .x))
+map_list = map(state_df_list,
+               ~ ggplot() +
+                 geom_sf(data = .x,
+                         mapping = aes(fill = bi_class), size = 0.1,
+                         show.legend = FALSE) +
+                 bi_scale_fill(pal = "BlueYl", dim = 3) +
+                 bi_theme())
+map_list[[7]] <- legend
+first_row = ggarrange(plotlist = map_list[1:3], nrow= 1, ncol = 3,
+                      labels = c('MA', 'NY', 'CT'),
+                      font.label = list(size = 12))
+second_row = ggarrange(plotlist = map_list[4:6], nrow = 1, ncol = 3,
+                       labels = c('AL', 'LA', 'MS'),
+                       font.label = list(size = 12))
+third_row = ggarrange(NULL, map_list[[7]], NULL, nrow = 1, ncol = 3,widths = c(1,2,1))
+combined_state_map = ggarrange(first_row, second_row, third_row, ncol = 1)
+png("six_state_chloropleth.png", width = 150, height = 150, units='mm', res = 300)
+combined_state_map
+dev.off()
+```
+
+
+```{r mason1}
+cleaned_df %>% 
+  filter(population >= 10000) %>% 
+  ggplot(aes(x = percent_over_65, y = suicides, color  = median_household_income)) + 
+  scale_x_log10(labels = scales::percent_format()) +
+  theme_light()+
+  geom_point(aes(size = median_household_income), alpha = 0.5) +
+  labs(x = "Percent Over 65", y = "Suicides per 100K", color = "Median household income",
+       title = "Older counties see more suicide, worsened by income shortfalls") +
+  scale_size_continuous(range = c(0.25,8), guide = 'none') +
+  geom_smooth(se=F, method = 'lm',color = 'orange' )  +
+  scale_color_viridis_c(option = 'magma', labels = scales::dollar_format(scale = 0.001, suffix = 'K')) +
+  theme(legend.position = "bottom", )
+        #legend.key.width = unit(1.5, 'cm')) 
+```
+
+```{r Mason | Median Household Incomes in Counties by Suicide Quintile}
+cleaned_df %>%
+  mutate(old = ifelse(percent_over_65 > median(percent_over_65), "Old", "Young")) %>%
+  mutate(old = factor(old)) %>% filter(!is.na(suicides)) %>%
+  mutate(qtile = ntile(suicides, 5)) %>%
+  mutate(qtile = factor(qtile)) %>%
+  group_by(qtile) %>%
+  mutate(med_income = median(median_household_income)) %>%
+  ungroup() %>%
+  ggplot(aes(x = median_household_income, y = qtile)) +
+  theme_light() +
+  ggridges::stat_density_ridges(aes(fill = qtile, color = qtile),
+                                alpha = 0.6, quantile_lines = T, quantiles = 2) +
+  theme(legend.position = 'bottom', legend.direction = 'horizontal') +
+  scale_x_log10(labels = scales::dollar_format(scale = 0.001, suffix = 'K', accuracy = 1)) +
+  labs(fill = 'Quintile', x = "Median Household Income", y = 'Quintile of Suicide Levels',
+       title = "Median Household Incomes in Counties by Suicide Quintile") +
+  guides(fill = guide_legend(override.aes = list(linetype = 0)),
+         color = 'none') +
+  NULL
+
+```
+
+```{r Mason | Median Household Incomes in Counties with Low Suicide Rates Have Bimodal Distributions}
+cleaned_df %>%
+  mutate(old = ifelse(percent_over_65 > median(percent_over_65), "Old", "Young")) %>%
+  mutate(old = factor(old)) %>% filter(!is.na(suicides)) %>%
+  mutate(qtile = ntile(suicides, 5)) %>%
+  mutate(qtile = factor(qtile)) %>%
+  group_by(qtile) %>%
+  mutate(med_income = median(median_household_income)) %>%
+  ungroup() %>%
+  ggplot(aes(x = median_household_income, y = qtile)) +
+  theme_light() +
+  ggridges::stat_density_ridges(aes(fill = old, color = old),
+                                alpha = 0.6, quantile_lines = T, quantiles = 2) +
+  theme(legend.position = 'bottom', legend.direction = 'horizontal') +
+  scale_x_log10(labels = scales::dollar_format(scale = 0.001, suffix = 'K', accuracy = 1)) +
+  labs(fill = '', x = "Median Household Income", y = 'Quintile of Suicide Levels',
+       title = "Median Household Incomes in Counties with Low Suicide Rates Have Bimodal Distributions") +
+  scale_color_brewer(palette = 'Set1') +
+  scale_fill_brewer(palette = 'Set1') +
+  guides(fill = guide_legend(override.aes = list(linetype = 0)),
+         color = 'none') +
+  NULL
+
+```
+
+```{r pilar|biploeth graph, cache=TRUE}
+
+county_geospatial_df =
+  tidycensus::get_acs(geography = "county",
+                      variables = "B19013_001",
+                      geometry = TRUE, year = 2021) %>%
+  select(-variable, -moe, -estimate) %>%
+  separate(col = 'NAME', into = c('county', 'state'), sep = ', ') %>%
+  mutate(state = usdata::state2abbr(state)) %>%
+  tigris::shift_geometry()
+
+geospatial_df = county_geospatial_df %>%
+  left_join(cleaned_df, by = c('state', 'county'))
+biclass_df <- geospatial_df %>%
+  filter(!is.na(excessive_drinking)) %>%
+  filter(!is.na(years_premature_death)) %>% 
+  select(GEOID, county, state,
+         years_premature_death, excessive_drinking, geometry, years_premature_death) %>%
+  bi_class(x = excessive_drinking,
+           y = years_premature_death,
+           style = "quantile", dim = 3)
+map <- ggplot() +
+  geom_sf(data = biclass_df,
+          mapping = aes(fill = bi_class),
+          color = "white", size = 0.1,
+          show.legend = FALSE) +
+  bi_scale_fill(pal = "BlueYl", dim = 3) +
+  bi_theme()
+legend <- bi_legend(pal = "BlueYl",
+                    dim = 3,
+                    xlab = "More Drinking",
+                    ylab = "More Premature Death",
+                    size = 10)
+finalPlot <- cowplot::ggdraw() +
+  cowplot::draw_plot(plot=map, x = 0, y = 0.2, width = 1, height = 0.8) +
+  cowplot::draw_plot(plot=legend, x = 0.55, y = 0.2, width = 0.2, height = 0.2)
+save_plot('chloropleth.png', finalPlot, dpi=500, base_height = 10)
+```
+
+```{r pilar|binge drinking}
+cleaned_df %>% filter(state %in% c('GA', 'TX', 'CA', 'OK', 'WI', 'LA', 'FL', 'MT'), 
+                      population>= 10000) %>% 
+  ggplot(aes(x = excessive_drinking, y = years_premature_death , color = state)) +
+  geom_point() + facet_wrap(~state, scale = 'free') +
+  geom_smooth(se = F, method = 'lm') +
+  scale_x_continuous(labels = scales::percent_format()) +
+  scale_y_continuous(labels = scales::comma_format(scale = 0.001, suffix = 'K')) +
+  scale_color_brewer(palette = 'Dark2') +
+  theme_light() +
+  labs(x='Excessive Drinking', y = '', color = '',
+       title = 'Years of Premature Deaths per 100K versus Binge Drinking Rates')
+```
+
+```{r}
+univariate_chloro_df =
+  tidycensus::get_acs(geography = "county",
+                      variables = "B19013_001",
+                      geometry = TRUE, year = 2021) %>%
+  select(-variable, -moe, -estimate) %>%
+  separate(col = 'NAME', into = c('county', 'state'), sep = ', ') %>%
+  mutate(state = usdata::state2abbr(state)) %>%
+  tigris::shift_geometry()  %>%
+  left_join(cleaned_df, by = c('state', 'county')) %>%
+  filter(!is.na(excessive_drinking)) %>%
+  select(GEOID, county, state, excessive_drinking, geometry)
+univar_map <-  ggplot() +
+  geom_sf(data = univariate_chloro_df,
+          mapping = aes(fill = excessive_drinking), size = 0.1) +
+  theme_bw() +
+  scale_fill_viridis_c(option = 'magma', direction = -1, begin = 0.2,
+                       labels = scales::percent_format()) +
+  coord_sf() +
+  theme(axis.line=element_blank(),
+        axis.text=element_blank(),
+        axis.ticks=element_blank(),
+        axis.title=element_blank(),
+        panel.background=element_blank(),
+        panel.border=element_blank(),
+        panel.grid = element_blank(),
+        plot.title = element_text(hjust = 0.5)) +
+  labs(fill = 'Excessive Drinking Rate',
+       title = 'Percentage of Adults Reporting Binge Drinking at County Level')
+finalPlot_univariate <- cowplot::ggdraw() +
+  cowplot::draw_plot(plot=univar_map, x = 0, y = 0, width = 1, height = 1)
+save_plot('univariate_chloropleth.png', univar_map, dpi=300, base_height = 5)
+```
+
